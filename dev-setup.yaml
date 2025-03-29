@@ -1,0 +1,80 @@
+globalEnv:
+  DB_URL: "postgres://localhost:5432/mydb"
+  REDIS_URL: "redis://localhost:6379"
+
+services:
+  - name: laravel-app
+    repo: "git@github.com:sCuz12/bell3-backend.git"
+    path: "./test-bell3"
+    startCommand: "composer install && php artisan key:generate"
+    dependsOn:
+      - redis
+    healthCheck:
+      type: "command"
+      cmd: "echo 'Laravel is installed'" 
+    env:
+      # Typical Laravel DB variables
+      DB_CONNECTION: "mysql"
+      DB_HOST: "127.0.0.1"
+      DB_PORT: "3306"
+      DB_DATABASE: "my_local_db"
+      DB_USERNAME: "my_user"
+      DB_PASSWORD: "my_password"
+
+      # Redis-related environment variables
+      REDIS_HOST: "127.0.0.1"
+      REDIS_PORT: "6379"
+      CACHE_DRIVER: "redis"
+      SESSION_DRIVER: "redis"
+
+      # Optional: other Laravel-specific vars
+      APP_ENV: "local"
+      APP_DEBUG: "true"
+      APP_URL: "http://localhost:3001"
+
+docker:
+  # 1) PHP-FPM Container for Laravel
+  - name: laravel-php
+    image: "php:8.1-fpm-alpine"
+    volumes:
+      - "./test-bell3:/var/www/html"
+    # environment variables (for DB, Redis, etc.)
+    env:
+      DB_CONNECTION: "mysql"
+      DB_HOST: "127.0.0.1"
+      DB_PORT: "3306"
+      DB_DATABASE: "my_local_db"
+      DB_USERNAME: "my_user"
+      DB_PASSWORD: "my_password"
+      REDIS_HOST: "127.0.0.1"
+      REDIS_PORT: "6379"
+
+  # 2) Nginx Container
+  - name: nginx
+    build:
+      context: "./nginx"         # path to your local Dockerfile
+      dockerfile: "./nginx/Dockerfile"   # (optional if the file is named Dockerfile)
+    ports:
+      - "8000:8000"                # map container's port 80 to host's 8080
+    dependsOn: 
+      - "laravel-php"
+    healthCheck:
+      type: "http"
+      url: "http://localhost:8080"
+    env: {}
+
+# Possibly define your DB and Redis containers here too...
+  - name: mysql
+    image: "mysql:8.0"
+    env:
+      MYSQL_ROOT_PASSWORD: "rootpass"
+      MYSQL_DATABASE: "my_local_db"
+      MYSQL_USER: "my_user"
+      MYSQL_PASSWORD: "my_password"
+    ports:
+      - "3306:3306"
+
+  - name: redis
+    image: "redis:7-alpine"
+    ports:
+      - "6379:6379"
