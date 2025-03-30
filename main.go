@@ -2,10 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/fatih/color"
+	"github.com/sCuz12/dev-setup/internal/healthcheck"
 	"github.com/spf13/cobra"
 	"gopkg.in/src-d/go-git.v4"
 	"gopkg.in/src-d/go-git.v4/plumbing/transport/ssh"
@@ -20,23 +24,24 @@ type Config struct {
 }
 
 type ServiceConfig struct {
-	Name         string            `yaml:"name"`
-	Repo         string            `yaml:"repo"`
-	Path         string            `yaml:"path"`
-	StartCommand string            `yaml:"startCommand"`
-	DependsOn    []string          `yaml:"dependsOn"`
-	HealthCheck  *HealthCheck      `yaml:"healthCheck"`
-	Env          map[string]string `yaml:"env"`
+	Name         string                   `yaml:"name"`
+	Repo         string                   `yaml:"repo"`
+	Path         string                   `yaml:"path"`
+	StartCommand string                   `yaml:"startCommand"`
+	DependsOn    []string                 `yaml:"dependsOn"`
+	HealthCheck  *healthcheck.HealthCheck `yaml:"healthCheck"`
+	Env          map[string]string        `yaml:"env"`
+	ComposeFile  string                   `yaml:"compose-file"`
 }
 
 type DockerConfig struct {
-	Name        string            `yaml:"name"`
-	Image       string            `yaml:"image"`
-	Build       Build             `yaml:"build"`
-	Ports       []string          `yaml:"volumes"`
-	Volumes 	[]string		  `yaml:"ports"`
-	Env         map[string]string `yaml:"env"`
-	HealthCheck *HealthCheck      `yaml:"healthCheck"`
+	Name        string                   `yaml:"name"`
+	Image       string                   `yaml:"image"`
+	Build       Build                    `yaml:"build"`
+	Ports       []string                 `yaml:"volumes"`
+	Volumes     []string                 `yaml:"ports"`
+	Env         map[string]string        `yaml:"env"`
+	HealthCheck *healthcheck.HealthCheck `yaml:"healthCheck"`
 }
 
 type Build struct {
@@ -49,13 +54,6 @@ type HookConfig struct {
 	Trigger string `yaml:"trigger"` // e.g. pre-start, post-start
 	Service string `yaml:"service"` // which service/container it relates to
 	Command string `yaml:"command"`
-}
-
-type HealthCheck struct {
-	Type string `yaml:"type"` // "http", "tcp", "command"
-	URL  string `yaml:"url"`  // for "http"
-	Port int    `yaml:"port"` // for "tcp"
-	Cmd  string `yaml:"cmd"`  // for "command"
 }
 
 var rootCmd = &cobra.Command{
@@ -98,15 +96,19 @@ func runInit() error {
 	if err != nil {
 		return err
 	}
-	
-	// start docker containers
-	// for _,dockerConfig := range cfg.Docker {
-	// 	startDockerContainer(dockerConfig)
-	// }
-	startDockerContainer(cfg.Docker[1])
-
+	// startDockerContainer(cfg.Docker[1])
 	//clone repos
 	if err := cloneRepos(resolvedServices); err != nil {
+		return err
+	}
+
+	// setup their docker-compose
+	runMicroserviceDockerCompose(resolvedServices)
+
+	// Health Check
+	err = performHealthCheck(resolvedServices)
+
+	if err != nil {
 		return err
 	}
 
@@ -170,61 +172,162 @@ func resolveServices(cfg *Config) ([]ServiceConfig, error) {
 }
 
 func startDockerContainer(d DockerConfig) error {
-    color.Magenta("Starting container with name %s", d.Name)
-    var imageToRun string
-    // 1) Build if there's a build context
-    if d.Build.Context != "" {
-        buildArgs := []string{"build", "-t", d.Name + ":latest"}
-        if d.Build.Dockerfile != "" {
-            buildArgs = append(buildArgs, "-f", d.Build.Dockerfile)
-        }
-        buildArgs = append(buildArgs, d.Build.Context)
+	color.Magenta("Starting container with name %s", d.Name)
+	var imageToRun string
+	// 1) Build if there's a build context
+	if d.Build.Context != "" {
+		buildArgs := []string{"build", "-t", d.Name + ":latest"}
+		if d.Build.Dockerfile != "" {
+			buildArgs = append(buildArgs, "-f", d.Build.Dockerfile)
+		}
+		buildArgs = append(buildArgs, d.Build.Context)
 
-        cmdBuild := exec.Command("docker", buildArgs...)
-        cmdBuild.Stdout = os.Stdout
-        cmdBuild.Stderr = os.Stderr
+		cmdBuild := exec.Command("docker", buildArgs...)
+		cmdBuild.Stdout = os.Stdout
+		cmdBuild.Stderr = os.Stderr
 
-        if err := cmdBuild.Run(); err != nil {
-            return fmt.Errorf("failed to build image for %s: %w", d.Name, err)
-        }
+		if err := cmdBuild.Run(); err != nil {
+			return fmt.Errorf("failed to build image for %s: %w", d.Name, err)
+		}
 
-        // If we built an image, we use "<name>:latest" for `docker run`
-        imageToRun = d.Name + ":latest"
-    } else {
-        // 2) Pull if no build context
-        cmdPull := exec.Command("docker", "pull", d.Image)
-        cmdPull.Stdout = os.Stdout
-        cmdPull.Stderr = os.Stderr
+		// If we built an image, we use "<name>:latest" for `docker run`
+		imageToRun = d.Name + ":latest"
+	} else {
+		// 2) Pull if no build context
+		cmdPull := exec.Command("docker", "pull", d.Image)
+		cmdPull.Stdout = os.Stdout
+		cmdPull.Stderr = os.Stderr
 
-        if err := cmdPull.Run(); err != nil {
-            return fmt.Errorf("failed to pull image %s: %w", d.Image, err)
-        }
-        // If we're not building, we use the user-provided image name
-        imageToRun = d.Image
-    }
+		if err := cmdPull.Run(); err != nil {
+			return fmt.Errorf("failed to pull image %s: %w", d.Image, err)
+		}
+		// If we're not building, we use the user-provided image name
+		imageToRun = d.Image
+	}
 
-    // 3) Compose `docker run` arguments
-    runArgs := []string{"run", "-d", "--name", d.Name}
+	// 3) Compose `docker run` arguments
+	runArgs := []string{"run", "-d", "--name", d.Name}
 
-    for _, p := range d.Ports {
-        runArgs = append(runArgs, "-p", p)
-    }
-    for k, v := range d.Env {
-        runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", k, v))
-    }
+	for _, p := range d.Ports {
+		runArgs = append(runArgs, "-p", p)
+	}
+	for k, v := range d.Env {
+		runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", k, v))
+	}
 	//Handle Volumes
 	for _, vol := range d.Volumes {
 		runArgs = append(runArgs, "-v", vol)
 	}
 
-    // **Always** run either the pulled or just-built image
-    runArgs = append(runArgs, imageToRun)
-    cmdRun := exec.Command("docker", runArgs...)
-    cmdRun.Stdout = os.Stdout
-    cmdRun.Stderr = os.Stderr
+	// **Always** run either the pulled or just-built image
+	runArgs = append(runArgs, imageToRun)
+	cmdRun := exec.Command("docker", runArgs...)
+	cmdRun.Stdout = os.Stdout
+	cmdRun.Stderr = os.Stderr
 
-    if err := cmdRun.Run(); err != nil {
-        return fmt.Errorf("failed to start container %s: %w", d.Name, err)
+	if err := cmdRun.Run(); err != nil {
+		return fmt.Errorf("failed to start container %s: %w", d.Name, err)
+	}
+	return nil
+}
+
+func runMicroserviceDockerCompose(services []ServiceConfig) error {
+	for _, srv := range services {
+		if srv.ComposeFile != "" {
+
+			//Auto discovery of compose file
+			err := runDockerCompose(srv)
+			if err != nil {
+				fmt.Errorf("failed to run compose for service %s: %w", srv.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func runDockerCompose(singleService ServiceConfig) error {
+	//get the filename
+	composePaths, err := findComposeFiles(singleService.Path, singleService.ComposeFile)
+
+	if err != nil {
+		return fmt.Errorf("Err: %w", err)
+	}
+
+	if len(composePaths) == 0 {
+		return fmt.Errorf("no compose file found for service %s", singleService.Name)
+	}
+	extractedComposePath := composePaths[0]
+
+	filenameOnly := filepath.Base(extractedComposePath)
+	//execute the container docker-compose up
+	cmd := exec.Command("docker", "compose", "-p", singleService.Name, "-f", filenameOnly, "up", "-d")
+	cmd.Dir = singleService.Path
+
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	fmt.Printf("Starting Docker Compose for %s using %s\n", singleService.Name, singleService.Path)
+
+	if err := cmd.Run(); err != nil {
+		fmt.Println(err)
+		return err
+	}
+	return nil
+}
+
+func findComposeFiles(rootPath string, composerFileName string) ([]string, error) {
+
+	var composeFiles []string
+
+	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && (strings.HasPrefix(d.Name(), composerFileName) && strings.HasSuffix(composerFileName, ".yml")) {
+			composeFiles = append(composeFiles, path)
+		}
+		return nil
+	})
+
+	return composeFiles, err
+}
+func performHealthCheck(services []ServiceConfig) error {
+	for _, svc := range services {
+		fmt.Printf("Performing Health check for service: %s", svc.Name)
+
+		if svc.HealthCheck != nil {
+			containerName,err := resolveContainerNameFromService(svc.Name)
+			doctor, err := healthcheck.NewHealthChecker(svc.HealthCheck,containerName)
+
+			err = doctor.Check()
+			fmt.Println(err)
+
+			if err != nil {
+				return fmt.Errorf("invalid health check for service %s: %w", svc.Name, err)
+			}
+
+			fmt.Printf("Waiting for %s to become healthy...\n", svc.Name)
+			// if err := doctor.WaitForService(); err != nil {
+			// 	return fmt.Errorf("service %s failed health check: %w", svc.Name, err)
+			// }
+		}
+	}
+	return nil
+}
+
+func resolveContainerNameFromService(serviceName string) (string, error) {
+    // Use docker ps to get containers filtered by name
+    cmd := exec.Command("docker", "ps", "--filter", fmt.Sprintf("name=%s", serviceName), "--format", "{{.Names}}")
+
+    output, err := cmd.Output()
+    if err != nil {
+        return "", fmt.Errorf("failed to execute docker ps: %w", err)
     }
-    return nil
+
+    containerName := strings.TrimSpace(string(output))
+    if containerName == "" {
+        return "", fmt.Errorf("no container found matching service name: %s", serviceName)
+    }
+
+    return containerName, nil
 }
