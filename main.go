@@ -93,7 +93,7 @@ func runInit() error {
 	
 	// Step 6: Run post-up hooks
 	  for _, svc := range resolvedServices {
-		containerName, err := resolveContainerNameFromService(svc.Name)
+		containerName, err := resolveContainerName(svc)
 
 		if err != nil {
 			return fmt.Errorf(err.Error())
@@ -307,7 +307,7 @@ func performHealthCheck(services []config.ServiceConfig) error {
 		fmt.Printf("Performing Health check for service: %s", svc.Name)
 
 		if svc.HealthCheck != nil {
-			containerName, err := resolveContainerNameFromService(svc.Name)
+			containerName, err := resolveContainerName(svc)
 			doctor, err := healthcheck.NewHealthChecker(svc.HealthCheck, containerName)
 
 			err = doctor.Check()
@@ -326,19 +326,22 @@ func performHealthCheck(services []config.ServiceConfig) error {
 	return nil
 }
 
-func resolveContainerNameFromService(serviceName string) (string, error) {
-	// Use docker ps to get containers filtered by name
-	cmd := exec.Command("docker", "ps", "--filter", fmt.Sprintf("name=%s", serviceName), "--format", "{{.Names}}")
+func resolveContainerName(service config.ServiceConfig) (string, error) {
+    out, err := exec.Command("docker", "ps", "--format", "{{.Names}}").Output()
+    if err != nil {
+        return "", err
+    }
 
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to execute docker ps: %w", err)
-	}
+    lines := strings.Split(string(out), "\n")
 
-	containerName := strings.TrimSpace(string(output))
-	if containerName == "" {
-		return "", fmt.Errorf("no container found matching service name: %s", serviceName)
-	}
+    expectedPrefix := service.Name + "-"
+    expectedRole := "app" 
 
-	return containerName, nil
+    for _, line := range lines {
+        if strings.HasPrefix(line, expectedPrefix) &&
+            strings.Contains(line, "-"+expectedRole+"-") { 
+            return line, nil
+        }
+    }
+    return "", fmt.Errorf("could not find container for service %s with role '%s'", service.Name, expectedRole)
 }

@@ -8,8 +8,6 @@ import (
 	"github.com/sCuz12/dev-setup/internal/config"
 )
 
-
-
 func RunHooks (service config.ServiceConfig,trigger string,containerName string) error {
 	for _,hook := range service.Hooks{
 		
@@ -26,8 +24,7 @@ func RunHooks (service config.ServiceConfig,trigger string,containerName string)
 }
 
 func executeHook(service config.ServiceConfig, hook config.HookConfig, containerName string) error {
-    fmt.Printf("Running hook '%s' for service %s inside container %s...\n", hook.Name, service.Name, containerName)
-
+    fmt.Printf("Running hook '%s' for service %s inside container %s the command %s \n", hook.Name, service.Name, containerName,hook.Run)
     cmd := exec.Command("docker", "exec", containerName, "sh", "-c", hook.Run)
 	cmd.Dir = service.Path
     

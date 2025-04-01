@@ -6,7 +6,6 @@ services:
   - name: laravel-app
     repo: "git@github.com:sCuz12/bell3-backend.git"
     path: "./test-bell3"
-    startCommand: "composer install && php artisan key:generate"
     compose-file : "docker-compose.yml"
     healthCheck:
       # type: "http"
