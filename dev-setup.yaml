@@ -13,6 +13,15 @@ services:
       # url: "http://localhost:80/utility/countries"
       type: "command"
       url: "php artisan help"
+    hooks:
+      - name: composer-install
+        trigger: post-up
+        run: |
+          composer install
+      - name: migrate
+        trigger: post-up
+        run: |
+          php artisan migrate
     env:
       # Typical Laravel DB variables
       DB_CONNECTION: "mysql"

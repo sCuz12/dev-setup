@@ -7,9 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/fatih/color"
+	"github.com/sCuz12/dev-setup/internal/config"
 	"github.com/sCuz12/dev-setup/internal/healthcheck"
+	"github.com/sCuz12/dev-setup/internal/hooks"
 	"github.com/spf13/cobra"
 	"gopkg.in/src-d/go-git.v4"
 	"gopkg.in/src-d/go-git.v4/plumbing/transport/ssh"
@@ -18,20 +21,9 @@ import (
 
 type Config struct {
 	GlobalEnv map[string]string `yaml:"globalEnv"`
-	Services  []ServiceConfig   `yaml:"services"`
+	Services  []config.ServiceConfig   `yaml:"services"`
 	Docker    []DockerConfig    `yaml:"docker"`
-	Hooks     []HookConfig      `yaml:"hooks"`
-}
-
-type ServiceConfig struct {
-	Name         string                   `yaml:"name"`
-	Repo         string                   `yaml:"repo"`
-	Path         string                   `yaml:"path"`
-	StartCommand string                   `yaml:"startCommand"`
-	DependsOn    []string                 `yaml:"dependsOn"`
-	HealthCheck  *healthcheck.HealthCheck `yaml:"healthCheck"`
-	Env          map[string]string        `yaml:"env"`
-	ComposeFile  string                   `yaml:"compose-file"`
+	Hooks     []config.HookConfig      `yaml:"hooks"`
 }
 
 type DockerConfig struct {
@@ -43,19 +35,10 @@ type DockerConfig struct {
 	Env         map[string]string        `yaml:"env"`
 	HealthCheck *healthcheck.HealthCheck `yaml:"healthCheck"`
 }
-
 type Build struct {
 	Context    string
 	Dockerfile string
 }
-
-type HookConfig struct {
-	Name    string `yaml:"name"`
-	Trigger string `yaml:"trigger"` // e.g. pre-start, post-start
-	Service string `yaml:"service"` // which service/container it relates to
-	Command string `yaml:"command"`
-}
-
 var rootCmd = &cobra.Command{
 	Use:   "dev-setup",
 	Short: "A tool for spinning up local microservices",
@@ -106,7 +89,20 @@ func runInit() error {
 	runMicroserviceDockerCompose(resolvedServices)
 
 	// Health Check
-	err = performHealthCheck(resolvedServices)
+	// err = performHealthCheck(resolvedServices)
+	
+	// Step 6: Run post-up hooks
+	  for _, svc := range resolvedServices {
+		containerName, err := resolveContainerNameFromService(svc.Name)
+
+		if err != nil {
+			return fmt.Errorf(err.Error())
+		}
+
+        if err := hooks.RunHooks(svc, "post-up",containerName); err != nil {
+            return fmt.Errorf("post-up hooks failed: %w", err)
+        }
+    }
 
 	if err != nil {
 		return err
@@ -116,19 +112,31 @@ func runInit() error {
 	return nil
 }
 
-func cloneRepos(resolvedServices []ServiceConfig) error {
-	for _, service := range resolvedServices {
-		err := cloneSingleRepo(service)
+func cloneRepos(resolvedServices []config.ServiceConfig) error {
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(resolvedServices))
 
-		if err != nil {
-			return err
-		}
-		fmt.Println("ok")
+	for _, svc := range resolvedServices {
+		svc := svc 
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := cloneSingleRepo(svc); err != nil {
+				errChan <- err
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		return err // fail fast
 	}
 	return nil
 }
 
-func cloneSingleRepo(service ServiceConfig) error {
+func cloneSingleRepo(service config.ServiceConfig) error {
 	fmt.Printf("Cloning the repository. %s\n", service.Repo)
 	// Path to your private key, e.g. ~/.ssh/id_rsa
 	// If you have a passphrase, pass it as the last parameter here.
@@ -142,6 +150,7 @@ func cloneSingleRepo(service ServiceConfig) error {
 		Progress: os.Stdout,
 		Auth:     auth,
 	})
+
 	if err != nil {
 		return fmt.Errorf("could not clone repo %s: %w", service.Repo, err)
 	}
@@ -161,8 +170,8 @@ func LoadConfig() (*Config, error) {
 	return &config, nil
 }
 
-func resolveServices(cfg *Config) ([]ServiceConfig, error) {
-	serviceMap := make(map[string]ServiceConfig)
+func resolveServices(cfg *Config) ([]config.ServiceConfig, error) {
+	serviceMap := make(map[string]config.ServiceConfig)
 
 	for _, svc := range cfg.Services {
 		serviceMap[svc.Name] = svc
@@ -231,7 +240,7 @@ func startDockerContainer(d DockerConfig) error {
 	return nil
 }
 
-func runMicroserviceDockerCompose(services []ServiceConfig) error {
+func runMicroserviceDockerCompose(services []config.ServiceConfig) error {
 	for _, srv := range services {
 		if srv.ComposeFile != "" {
 
@@ -245,7 +254,7 @@ func runMicroserviceDockerCompose(services []ServiceConfig) error {
 	return nil
 }
 
-func runDockerCompose(singleService ServiceConfig) error {
+func runDockerCompose(singleService config.ServiceConfig) error {
 	//get the filename
 	composePaths, err := findComposeFiles(singleService.Path, singleService.ComposeFile)
 
@@ -256,6 +265,7 @@ func runDockerCompose(singleService ServiceConfig) error {
 	if len(composePaths) == 0 {
 		return fmt.Errorf("no compose file found for service %s", singleService.Name)
 	}
+
 	extractedComposePath := composePaths[0]
 
 	filenameOnly := filepath.Base(extractedComposePath)
@@ -268,6 +278,7 @@ func runDockerCompose(singleService ServiceConfig) error {
 
 	fmt.Printf("Starting Docker Compose for %s using %s\n", singleService.Name, singleService.Path)
 
+	fmt.Println("Running docker-compose from directory:", cmd.Dir)
 	if err := cmd.Run(); err != nil {
 		fmt.Println(err)
 		return err
@@ -291,13 +302,13 @@ func findComposeFiles(rootPath string, composerFileName string) ([]string, error
 
 	return composeFiles, err
 }
-func performHealthCheck(services []ServiceConfig) error {
+func performHealthCheck(services []config.ServiceConfig) error {
 	for _, svc := range services {
 		fmt.Printf("Performing Health check for service: %s", svc.Name)
 
 		if svc.HealthCheck != nil {
-			containerName,err := resolveContainerNameFromService(svc.Name)
-			doctor, err := healthcheck.NewHealthChecker(svc.HealthCheck,containerName)
+			containerName, err := resolveContainerNameFromService(svc.Name)
+			doctor, err := healthcheck.NewHealthChecker(svc.HealthCheck, containerName)
 
 			err = doctor.Check()
 			fmt.Println(err)
@@ -316,18 +327,18 @@ func performHealthCheck(services []ServiceConfig) error {
 }
 
 func resolveContainerNameFromService(serviceName string) (string, error) {
-    // Use docker ps to get containers filtered by name
-    cmd := exec.Command("docker", "ps", "--filter", fmt.Sprintf("name=%s", serviceName), "--format", "{{.Names}}")
+	// Use docker ps to get containers filtered by name
+	cmd := exec.Command("docker", "ps", "--filter", fmt.Sprintf("name=%s", serviceName), "--format", "{{.Names}}")
 
-    output, err := cmd.Output()
-    if err != nil {
-        return "", fmt.Errorf("failed to execute docker ps: %w", err)
-    }
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to execute docker ps: %w", err)
+	}
 
-    containerName := strings.TrimSpace(string(output))
-    if containerName == "" {
-        return "", fmt.Errorf("no container found matching service name: %s", serviceName)
-    }
+	containerName := strings.TrimSpace(string(output))
+	if containerName == "" {
+		return "", fmt.Errorf("no container found matching service name: %s", serviceName)
+	}
 
-    return containerName, nil
+	return containerName, nil
 }
