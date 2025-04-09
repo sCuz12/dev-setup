@@ -23,7 +23,6 @@ type Config struct {
 	GlobalEnv map[string]string `yaml:"globalEnv"`
 	Services  []config.ServiceConfig   `yaml:"services"`
 	Docker    []DockerConfig    `yaml:"docker"`
-	Hooks     []config.HookConfig      `yaml:"hooks"`
 }
 
 type DockerConfig struct {
@@ -60,7 +59,7 @@ func main() {
 	rootCmd.AddCommand(initCmd)
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		fmt.Printf("The script exited with the following Error %v",err)
 		os.Exit(1)
 	}
 }
@@ -79,6 +78,7 @@ func runInit() error {
 	if err != nil {
 		return err
 	}
+
 	// startDockerContainer(cfg.Docker[1])
 	//clone repos
 	if err := cloneRepos(resolvedServices); err != nil {
@@ -166,7 +166,6 @@ func LoadConfig() (*Config, error) {
 
 	var config Config
 	err = yaml.Unmarshal(yfile, &config)
-	fmt.Println(config)
 	return &config, nil
 }
 
