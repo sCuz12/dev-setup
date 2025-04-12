@@ -20,7 +20,11 @@ services:
       - name: migrate
         trigger: post-up
         run: |
-          php artisan migrate
+          php artisan help
+      - name : copy-env
+        trigger : post-up
+        run : |
+          cp .env.example .env
     env:
       # Typical Laravel DB variables
       DB_CONNECTION: "mysql"
